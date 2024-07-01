@@ -1,4 +1,6 @@
-ddpm_env/
 .idea/
 .vscode/
 *.egg-info/
+logs/
+models/
+**/__pycache__/
