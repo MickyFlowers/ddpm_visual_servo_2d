@@ -64,8 +64,8 @@ class Downsample(nn.Module):
         super().__init__()
 
         self.downsample = nn.Conv2d(in_channels, in_channels, 3, stride=2, padding=1)
-    
-    def forward(self, x, time_emb, y):
+
+    def forward(self, x, ref, seg, time_emb=None):
         if x.shape[2] % 2 == 1:
             raise ValueError("downsampling tensor height should be even")
         if x.shape[3] % 2 == 1:
@@ -94,8 +94,8 @@ class Upsample(nn.Module):
             nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(in_channels, in_channels, 3, padding=1),
         )
-    
-    def forward(self, x, time_emb, y):
+
+    def forward(self, x, ref, seg, t):
         return self.upsample(x)
 
 
@@ -111,9 +111,10 @@ class AttentionBlock(nn.Module):
     Args:
         in_channels (int): number of input channels
     """
+
     def __init__(self, in_channels, norm="gn", num_groups=32):
         super().__init__()
-        
+
         self.in_channels = in_channels
         self.norm = get_norm(norm, in_channels, num_groups)
         self.to_qkv = nn.Conv2d(in_channels, in_channels * 3, 1)
@@ -129,6 +130,48 @@ class AttentionBlock(nn.Module):
 
         dot_products = torch.bmm(q, k) * (c ** (-0.5))
         assert dot_products.shape == (b, h * w, h * w)
+
+        attention = torch.softmax(dot_products, dim=-1)
+        out = torch.bmm(attention, v)
+        assert out.shape == (b, h * w, c)
+        out = out.view(b, h, w, c).permute(0, 3, 1, 2)
+
+        return self.to_out(out) + x
+
+
+class CrossAttentionBlock(nn.Module):
+    __doc__ = r"""Applies QKV self-attention with a residual connection.
+    
+    Input:
+        x: tensor of shape (N, in_channels, H, W)
+        norm (string or None): which normalization to use (instance, group, batch, or none). Default: "gn"
+        num_groups (int): number of groups used in group normalization. Default: 32
+    Output:
+        tensor of shape (N, in_channels, H, W)
+    Args:
+        in_channels (int): number of input channels
+    """
+
+    def __init__(self, in_channels, norm="gn", num_groups=32):
+        super().__init__()
+
+        self.in_channels = in_channels
+        self.norm = get_norm(norm, in_channels, num_groups)
+        self.to_q = nn.Conv2d(in_channels, in_channels, 1)
+        self.to_kv = nn.Conv2d(in_channels, in_channels * 2, 1)
+        self.to_out = nn.Conv2d(in_channels, in_channels, 1)
+
+    def forward(self, x, feature):
+        b, c, h, w = x.shape
+        q = self.to_q(self.norm(x))
+        k, v = torch.split(self.to_kv(self.norm(feature)), self.in_channels, dim=1)
+
+        q = q.permute(0, 2, 3, 1).view(b, -1, c)
+        k = k.view(b, c, -1)
+        v = v.permute(0, 2, 3, 1).view(b, -1, c)
+
+        dot_products = torch.bmm(q, k) * (c ** (-0.5))
+        # assert dot_products.shape == (b, h * w, h * w)
 
         attention = torch.softmax(dot_products, dim=-1)
         out = torch.bmm(attention, v)
@@ -164,14 +207,13 @@ class ResidualBlock(nn.Module):
         out_channels,
         dropout,
         time_emb_dim=None,
-        num_classes=None,
         activation=F.relu,
         norm="gn",
         num_groups=32,
         use_attention=False,
     ):
         super().__init__()
-
+        self.use_attention = use_attention
         self.activation = activation
 
         self.norm_1 = get_norm(norm, in_channels, num_groups)
@@ -182,31 +224,53 @@ class ResidualBlock(nn.Module):
             nn.Dropout(p=dropout),
             nn.Conv2d(out_channels, out_channels, 3, padding=1),
         )
+        self.ref_conv = nn.Conv2d(3, out_channels, 5, 5)
+        self.seg_conv = nn.Conv2d(3, out_channels, 5, 5)
+        
+        self.feature_conv = nn.Conv2d(out_channels * 2, out_channels, 3, 3)
+        self.time_bias = (
+            nn.Linear(time_emb_dim, out_channels) if time_emb_dim is not None else None
+        )
+        self.residual_connection = (
+            nn.Conv2d(in_channels, out_channels, 1)
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+        self.attention = (
+            nn.Identity()
+            if not use_attention
+            else AttentionBlock(out_channels, norm, num_groups)
+        )
+        self.cross_attention = (
+            nn.Identity()
+            if not use_attention
+            else CrossAttentionBlock(out_channels, norm, num_groups)
+        )
 
-        self.time_bias = nn.Linear(time_emb_dim, out_channels) if time_emb_dim is not None else None
-        self.class_bias = nn.Embedding(num_classes, out_channels) if num_classes is not None else None
-
-        self.residual_connection = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
-        self.attention = nn.Identity() if not use_attention else AttentionBlock(out_channels, norm, num_groups)
-    
-    def forward(self, x, time_emb=None, y=None):
-        out = self.activation(self.norm_1(x))
+    def forward(self, tar, ref, seg, time_emb=None):
+        out = self.activation(self.norm_1(tar))
         out = self.conv_1(out)
 
         if self.time_bias is not None:
             if time_emb is None:
-                raise ValueError("time conditioning was specified but time_emb is not passed")
+                raise ValueError(
+                    "time conditioning was specified but time_emb is not passed"
+                )
             out += self.time_bias(self.activation(time_emb))[:, :, None, None]
 
-        if self.class_bias is not None:
-            if y is None:
-                raise ValueError("class conditioning was specified but y is not passed")
-
-            out += self.class_bias(y)[:, :, None, None]
-
         out = self.activation(self.norm_2(out))
-        out = self.conv_2(out) + self.residual_connection(x)
+        out = self.conv_2(out) + self.residual_connection(tar)
+
         out = self.attention(out)
+
+        ref_feature = self.ref_conv(ref)
+        seg_feature = self.seg_conv(seg)
+        feature = torch.cat([ref_feature, seg_feature], dim=1)
+        feature = self.feature_conv(feature)
+        if self.use_attention:
+            out = self.cross_attention(out, feature)
+        else:
+            out = self.cross_attention(out)
 
         return out
 
@@ -243,7 +307,6 @@ class UNet(nn.Module):
         num_res_blocks=2,
         time_emb_dim=None,
         time_emb_scale=1.0,
-        num_classes=None,
         activation=F.relu,
         dropout=0.1,
         attention_resolutions=(),
@@ -256,14 +319,17 @@ class UNet(nn.Module):
         self.activation = activation
         self.initial_pad = initial_pad
 
-        self.num_classes = num_classes
-        self.time_mlp = nn.Sequential(
-            PositionalEmbedding(base_channels, time_emb_scale),
-            nn.Linear(base_channels, time_emb_dim),
-            nn.SiLU(),
-            nn.Linear(time_emb_dim, time_emb_dim),
-        ) if time_emb_dim is not None else None
-    
+        self.time_mlp = (
+            nn.Sequential(
+                PositionalEmbedding(base_channels, time_emb_scale),
+                nn.Linear(base_channels, time_emb_dim),
+                nn.SiLU(),
+                nn.Linear(time_emb_dim, time_emb_dim),
+            )
+            if time_emb_dim is not None
+            else None
+        )
+
         self.init_conv = nn.Conv2d(img_channels, base_channels, 3, padding=1)
 
         self.downs = nn.ModuleList()
@@ -276,111 +342,105 @@ class UNet(nn.Module):
             out_channels = base_channels * mult
 
             for _ in range(num_res_blocks):
-                self.downs.append(ResidualBlock(
-                    now_channels,
-                    out_channels,
-                    dropout,
-                    time_emb_dim=time_emb_dim,
-                    num_classes=num_classes,
-                    activation=activation,
-                    norm=norm,
-                    num_groups=num_groups,
-                    use_attention=i in attention_resolutions,
-                ))
+                self.downs.append(
+                    ResidualBlock(
+                        now_channels,
+                        out_channels,
+                        dropout,
+                        time_emb_dim=time_emb_dim,
+                        activation=activation,
+                        norm=norm,
+                        num_groups=num_groups,
+                        use_attention=False,
+                    )
+                )
                 now_channels = out_channels
                 channels.append(now_channels)
-            
+
             if i != len(channel_mults) - 1:
                 self.downs.append(Downsample(now_channels))
                 channels.append(now_channels)
-        
 
-        self.mid = nn.ModuleList([
-            ResidualBlock(
-                now_channels,
-                now_channels,
-                dropout,
-                time_emb_dim=time_emb_dim,
-                num_classes=num_classes,
-                activation=activation,
-                norm=norm,
-                num_groups=num_groups,
-                use_attention=True,
-            ),
-            ResidualBlock(
-                now_channels,
-                now_channels,
-                dropout,
-                time_emb_dim=time_emb_dim,
-                num_classes=num_classes,
-                activation=activation,
-                norm=norm,
-                num_groups=num_groups,
-                use_attention=False,
-            ),
-        ])
+        self.mid = nn.ModuleList(
+            [
+                ResidualBlock(
+                    now_channels,
+                    now_channels,
+                    dropout,
+                    time_emb_dim=time_emb_dim,
+                    activation=activation,
+                    norm=norm,
+                    num_groups=num_groups,
+                    use_attention=True,
+                ),
+                ResidualBlock(
+                    now_channels,
+                    now_channels,
+                    dropout,
+                    time_emb_dim=time_emb_dim,
+                    activation=activation,
+                    norm=norm,
+                    num_groups=num_groups,
+                    use_attention=False,
+                ),
+            ]
+        )
 
         for i, mult in reversed(list(enumerate(channel_mults))):
             out_channels = base_channels * mult
 
             for _ in range(num_res_blocks + 1):
-                self.ups.append(ResidualBlock(
-                    channels.pop() + now_channels,
-                    out_channels,
-                    dropout,
-                    time_emb_dim=time_emb_dim,
-                    num_classes=num_classes,
-                    activation=activation,
-                    norm=norm,
-                    num_groups=num_groups,
-                    use_attention=i in attention_resolutions,
-                ))
+                self.ups.append(
+                    ResidualBlock(
+                        channels.pop() + now_channels,
+                        out_channels,
+                        dropout,
+                        time_emb_dim=time_emb_dim,
+                        activation=activation,
+                        norm=norm,
+                        num_groups=num_groups,
+                        use_attention=False,
+                    )
+                )
                 now_channels = out_channels
-            
+
             if i != 0:
                 self.ups.append(Upsample(now_channels))
-        
+
         assert len(channels) == 0
-        
+
         self.out_norm = get_norm(norm, base_channels, num_groups)
         self.out_conv = nn.Conv2d(base_channels, img_channels, 3, padding=1)
-    
-    def forward(self, x, time=None, y=None):
-        ip = self.initial_pad
-        if ip != 0:
-            x = F.pad(x, (ip,) * 4)
+
+    def forward(self, tar, ref, seg, time=None):
 
         if self.time_mlp is not None:
             if time is None:
-                raise ValueError("time conditioning was specified but tim is not passed")
-            
+                raise ValueError(
+                    "time conditioning was specified but tim is not passed"
+                )
+
             time_emb = self.time_mlp(time)
         else:
             time_emb = None
-        
-        if self.num_classes is not None and y is None:
-            raise ValueError("class conditioning was specified but y is not passed")
-        
-        x = self.init_conv(x)
+
+        x = self.init_conv(tar)
 
         skips = [x]
 
         for layer in self.downs:
-            x = layer(x, time_emb, y)
+            x = layer(x, ref, seg, time_emb)
             skips.append(x)
-        
+
         for layer in self.mid:
-            x = layer(x, time_emb, y)
-        
+            x = layer(x, ref, seg, time_emb)
+
         for layer in self.ups:
             if isinstance(layer, ResidualBlock):
                 x = torch.cat([x, skips.pop()], dim=1)
-            x = layer(x, time_emb, y)
+            x = layer(x, ref, seg, time_emb)
 
         x = self.activation(self.out_norm(x))
         x = self.out_conv(x)
-        
-        if self.initial_pad != 0:
-            return x[:, :, ip:-ip, ip:-ip]
-        else:
-            return x
+
+        return x

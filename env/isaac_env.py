@@ -26,7 +26,7 @@ import omni.isaac.core.utils.prims as prims_utils
 
 class env:
     def __init__(self, root_path, render, physics_dt=1 / 60.0) -> None:
-        self.img_count = 13110
+        self.img_count = 15614
         self.root_path = root_path
         self.robot_dof_names = ["finger_joint", "right_outer_knuckle_joint"]
         self.robot_dof_idx = [0, 1]

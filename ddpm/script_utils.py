@@ -19,13 +19,13 @@ def cycle(dl):
             yield data
 
 def get_transform():
-    class RescaleChannels(object):
-        def __call__(self, sample):
-            return 2 * sample - 1
-
+    # class Normalize(object):
+    #     def __call__(self, tensor):
+    #         return tensor.float() / 255.0
+        
     return torchvision.transforms.Compose([
+        # Normalize(),
         torchvision.transforms.ToTensor(),
-        RescaleChannels(),
     ])
 
 
@@ -63,14 +63,15 @@ def diffusion_defaults():
         loss_type="l2",
         use_labels=False,
 
-        base_channels=128,
-        channel_mults=(1, 2, 2, 2),
+        base_channels=32,
+        num_groups=8,
+        channel_mults=(1, 1, 2, 2, 2),
         num_res_blocks=2,
         time_emb_dim=128 * 4,
         norm="gn",
         dropout=0.1,
         activation="silu",
-        attention_resolutions=(1,),
+        attention_resolutions=(),
 
         ema_decay=0.9999,
         ema_update_rate=1,
@@ -94,10 +95,9 @@ def get_diffusion_from_args(args):
         time_emb_dim=args.time_emb_dim,
         norm=args.norm,
         dropout=args.dropout,
+        num_groups=args.num_groups,
         activation=activations[args.activation],
         attention_resolutions=args.attention_resolutions,
-
-        num_classes=None if not args.use_labels else 10,
         initial_pad=0,
     )
 
@@ -111,7 +111,7 @@ def get_diffusion_from_args(args):
         )
 
     diffusion = GaussianDiffusion(
-        model, (32, 32), 3, 10,
+        model, (480, 640), 3, 10,
         betas,
         ema_decay=args.ema_decay,
         ema_update_rate=args.ema_update_rate,
