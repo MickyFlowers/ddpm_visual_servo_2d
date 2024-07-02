@@ -137,7 +137,7 @@ def create_argparser():
     run_name = datetime.datetime.now().strftime("ddpm-%Y-%m-%d-%H-%M")
     defaults = dict(
         data_dir="/cyx/data/ddpm_vs/img",
-        learning_rate=1e-4,
+        learning_rate=2e-5,
         batch_size=8,
         iterations=800000,
         log_to_tensorboard=True,
