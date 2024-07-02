@@ -18,15 +18,19 @@ def cycle(dl):
         for data in dl:
             yield data
 
+
 def get_transform():
-    # class Normalize(object):
-    #     def __call__(self, tensor):
-    #         return tensor.float() / 255.0
-        
-    return torchvision.transforms.Compose([
-        # Normalize(),
-        torchvision.transforms.ToTensor(),
-    ])
+    class Normalize(object):
+        def __call__(self, tensor):
+            return tensor * 2. - 1.
+
+    return torchvision.transforms.Compose(
+        [
+            # Normalize(),
+            torchvision.transforms.ToTensor(),
+            Normalize(),
+        ]
+    )
 
 
 def str2bool(v):
@@ -62,7 +66,6 @@ def diffusion_defaults():
         schedule="linear",
         loss_type="l2",
         use_labels=False,
-
         base_channels=32,
         num_groups=8,
         channel_mults=(1, 1, 2, 2, 2),
@@ -72,7 +75,6 @@ def diffusion_defaults():
         dropout=0.1,
         activation="silu",
         attention_resolutions=(),
-
         ema_decay=0.9999,
         ema_update_rate=1,
     )
@@ -89,7 +91,6 @@ def get_diffusion_from_args(args):
 
     model = UNet(
         img_channels=3,
-
         base_channels=args.base_channels,
         channel_mults=args.channel_mults,
         time_emb_dim=args.time_emb_dim,
@@ -111,7 +112,10 @@ def get_diffusion_from_args(args):
         )
 
     diffusion = GaussianDiffusion(
-        model, (480, 640), 3, 10,
+        model,
+        (480, 640),
+        3,
+        10,
         betas,
         ema_decay=args.ema_decay,
         ema_update_rate=args.ema_update_rate,

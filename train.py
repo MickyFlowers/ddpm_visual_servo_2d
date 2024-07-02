@@ -38,7 +38,7 @@ def main():
         logger.info(f"dataset size: {dataset_size}")
         dataset_list = np.arange(0, dataset_size)
         train_list = np.random.choice(
-            dataset_list, int(dataset_size * 0.99), replace=False
+            dataset_list, int(dataset_size * 0.95), replace=False
         )
         test_list = np.setdiff1d(dataset_list, train_list)
         train_dataset = torch.utils.data.Subset(dataset, train_list)
@@ -90,7 +90,7 @@ def main():
                 with torch.no_grad():
                     diffusion.eval()
                     for tar, ref, seg in test_loader:
-                        
+
                         ref = ref.to(device)
                         tar = tar.to(device)
                         seg = seg.to(device)
@@ -103,16 +103,14 @@ def main():
                     seg = seg.to(device)
                     break
                 samples = diffusion.sample(args.batch_size, device, ref, seg)
-                samples = samples.clip(0, 1).numpy()
-                gt = tar.clip(0, 1).detach().cpu().numpy()
+                samples = ((samples + 1) / 2).clip(0, 1).numpy()
+                gt = ((tar + 1) / 1).clip(0, 1).detach().cpu().numpy()
                 test_loss /= len(test_loader)
                 acc_train_loss /= args.log_rate
                 if args.log_to_tensorboard:
                     writer.add_scalar("loss/test_loss", test_loss, iteration)
                     writer.add_scalar("loss/train_loss", acc_train_loss, iteration)
-                    writer.add_image(
-                        f"sample", samples, iteration, dataformats="NCHW"
-                    )
+                    writer.add_image(f"sample", samples, iteration, dataformats="NCHW")
                     writer.add_image(f"gt", gt, iteration, dataformats="NCHW")
 
                 acc_train_loss = 0
